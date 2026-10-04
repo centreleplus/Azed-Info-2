@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    
+    <!-- 🟢 FAVICON SPHÈRE GRIS ORIGINALE (100% CADRÉE & FIDÈLE) -->
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon-circle.png?v=3" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-circle.png?v=3" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon-circle.png?v=3" />
+    <link rel="shortcut icon" href="/favicon-circle.png?v=3" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A-Zed Info | Plateforme d'Apprentissage</title>
+    <meta name="description" content="Plateforme éducative tunisienne A-Zed Info pour l'apprentissage de l'informatique et de Python pour lycéens, cours, calendrier interactif, et coordination pédagogique avec Centre Le Plus." />
+    <meta property="og:title" content="A-Zed Info" />
+    <meta property="og:description" content="Plateforme éducative tunisienne A-Zed Info pour l'apprentissage de l'informatique et de Python pour lycéens." />
+    <!-- Native PDF.js Integration -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+
+      // Silent error handler for benign WebSocket / Vite HMR preview disconnections
+      (function() {
+        try {
+          const isBenignWsError = function(msg) {
+            if (!msg) return false;
+            const str = String(msg).toLowerCase();
+            return str.includes('websocket') || 
+                   str.includes('failed to connect to websocket') || 
+                   str.includes('closed without opened') || 
+                   str.includes('connection closed') ||
+                   str.includes('vite:ws');
+          };
+
+          window.addEventListener('unhandledrejection', function(event) {
+            if (isBenignWsError(event.reason) || isBenignWsError(event.reason?.message)) {
+              event.preventDefault();
+            }
+          });
+
+          window.addEventListener('error', function(event) {
+            if (isBenignWsError(event.message) || isBenignWsError(event.error)) {
+              event.preventDefault();
+            }
+          });
+
+          // Safe WebSocket proxy to handle closed-without-opened in sandboxed iframe
+          const OriginalWebSocket = window.WebSocket;
+          if (OriginalWebSocket) {
+            const SafeWebSocket = function(...args) {
+              try {
+                const ws = new OriginalWebSocket(...args);
+                ws.addEventListener('error', function() {
+                  // Silently ignore sandbox HMR connection drop
+                });
+                return ws;
+              } catch (e) {
+                return {
+                  addEventListener: function() {},
+                  removeEventListener: function() {},
+                  send: function() {},
+                  close: function() {},
+                  readyState: 3
+                };
+              }
+            };
+            SafeWebSocket.prototype = OriginalWebSocket.prototype;
+            try {
+              Object.defineProperty(window, 'WebSocket', {
+                value: SafeWebSocket,
+                writable: true,
+                configurable: true,
+                enumerable: true
+              });
+            } catch (err) {
+              try {
+                window.WebSocket = SafeWebSocket;
+              } catch (err2) {}
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

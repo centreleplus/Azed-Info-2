@@ -1,0 +1,1932 @@
+import React, { useState, useEffect } from "react";
+import confetti from "canvas-confetti";
+import { Language, translations } from "../lib/translations";
+import { 
+  CheckCircle, 
+  AlertTriangle, 
+  Play, 
+  HelpCircle, 
+  Code, 
+  Plus, 
+  Trash2, 
+  Award, 
+  Zap, 
+  Send, 
+  RefreshCw, 
+  FileText, 
+  CheckCircle2, 
+  BarChart2, 
+  Sparkles,
+  ChevronRight,
+  BookOpen,
+  Lock,
+  Search,
+  ArrowLeft,
+  Filter
+} from "lucide-react";
+import { User as UserType, isContentAccessibleToStudent, canStudentAccessContent, GradeLevel, SectionStream, StudentCategory } from "../types";
+import { BranchCheckboxGroup } from "./BranchCheckboxGroup";
+import { BADGE_COLORS } from "../constants/packages";
+import { isUserAuthorized, canAccessQuiz, normalizeBadge } from "../constants/badges";
+import { renderBadge } from "./QuizCard";
+import { AccessDeniedModal } from "./AccessDeniedModal";
+
+const normalizeTrimestre = (trim: string) => {
+  if (!trim) return "";
+  let t = trim.toLowerCase().trim();
+  if (t.includes("1er") || t.includes("1ère")) {
+    return "1ere trimestre";
+  }
+  if (t.includes("2eme") || t.includes("2ème")) {
+    return "2eme trimestre";
+  }
+  if (t.includes("3eme") || t.includes("3ème")) {
+    return "3eme trimestre";
+  }
+  if (t.includes("revision") || t.includes("révision")) {
+    return "revision";
+  }
+  return t;
+};
+
+// Front-end Interfaces matching database schemas
+interface QuizQuestion {
+  questionText?: string;
+  options?: string[];
+  correctAnswerIndex?: number;
+  correctAnswers?: string[]; // for Fill in the Blanks
+  challengeDescription?: string;
+  starterCode?: string;
+  validationPattern?: string;
+  solutionCode?: string;
+  explanation?: string;
+}
+
+interface InteractiveQuiz {
+  id: string;
+  title: string;
+  chapterTitle?: string;
+  chapter?: string;
+  type: "qcm" | "fllblanks" | "coding_challenge";
+  grade: string;
+  difficulty: "Debutant" | "Intermediaire" | "Avance";
+  creatorName: string;
+  createdAt: string;
+  questions: QuizQuestion[];
+  trimestre?: string;
+  isPremium?: boolean;
+}
+
+interface QuizSubmission {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  quizId: string;
+  quizTitle: string;
+  quizType: "qcm" | "fllblanks" | "coding_challenge";
+  score: number;
+  totalQuestions: number;
+  correctCount: number;
+  completedAt: string;
+  details?: any;
+}
+
+interface PerformanceReport {
+  userId: string;
+  totalAttempts: number;
+  averageScore: number;
+  completedQuizzesCount: number;
+  attempts: QuizSubmission[];
+}
+
+interface InteractiveQuizModuleProps {
+  currentUser: UserType;
+  handlePreparePremiumUpgrade: () => void;
+  isPremiumUser: boolean;
+  selectedTrimestre?: string;
+  currentLanguage?: Language;
+}
+
+export default function InteractiveQuizModule({ 
+  currentUser, 
+  handlePreparePremiumUpgrade,
+  isPremiumUser,
+  selectedTrimestre,
+  currentLanguage = "fr"
+}: InteractiveQuizModuleProps) {
+  const t = translations[currentLanguage];
+  // General states
+  const [quizzes, setQuizzes] = useState<InteractiveQuiz[]>([]);
+  const [quizTips, setQuizTips] = useState<any[]>([]);
+  const [performance, setPerformance] = useState<PerformanceReport | null>(null);
+  const [selectedQuiz, setSelectedQuiz] = useState<InteractiveQuiz | null>(null);
+  const [selectedQuizForDeniedModal, setSelectedQuizForDeniedModal] = useState<InteractiveQuiz | null>(null);
+  const [isDeniedModalOpen, setIsDeniedModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<"resoudre" | "creer">(
+    currentUser.role === "admin" ? "creer" : "resoudre"
+  );
+  
+  // Student Solver states
+  const [userAnswers, setUserAnswers] = useState<{ [qIndex: number]: any }>({});
+  const [qFeedback, setQFeedback] = useState<{ [qIndex: number]: { correct: boolean; checked: boolean; msg?: string } }>({});
+  const [isSubmittingScore, setIsSubmittingScore] = useState(false);
+  const [submissionSuccess, setSubmissionSuccess] = useState<string | null>(null);
+  const [lastSubmission, setLastSubmission] = useState<{
+    score: number;
+    totalQuestions: number;
+    correctCount: number;
+    quizTitle: string;
+    quizType: string;
+  } | null>(null);
+
+  // Coding engine states
+  const [codeDrafts, setCodeDrafts] = useState<{ [qIndex: number]: string }>({});
+  const [codeOutputs, setCodeOutputs] = useState<{ [qIndex: number]: { output: string; running: boolean; success: boolean | null } }>({});
+
+  // Instructor Form states
+  const [newTitle, setNewTitle] = useState("");
+  const [newType, setNewType] = useState<"qcm" | "fllblanks" | "coding_challenge">("qcm");
+  const [newGrade, setNewGrade] = useState("4ème");
+  const [newSections, setNewSections] = useState<string[]>(["Tous"]);
+  const [newSection, setNewSection] = useState("Tous");
+  const [newDifficulty, setNewDifficulty] = useState<"Debutant" | "Intermediaire" | "Avance">("Intermediaire");
+  
+  // MCQ Form Sub-States
+  const [mcqQuestions, setMcqQuestions] = useState<Array<{
+    questionText: string;
+    options: string[];
+    correctAnswerIndex: number;
+    explanation?: string;
+  }>>([{ questionText: "", options: ["", ""], correctAnswerIndex: 0, explanation: "" }]);
+
+  // FIB Form Sub-States
+  const [fibQuestions, setFibQuestions] = useState<Array<{
+    questionText: string;
+    correctAnswers: string[];
+    explanation: string;
+  }>>([{ questionText: "La fonction [print] affiche du texte en Python.", correctAnswers: ["print"], explanation: "" }]);
+
+  // Coding Form Sub-States
+  const [codingQuestions, setCodingQuestions] = useState<Array<{
+    challengeDescription: string;
+    starterCode: string;
+    validationPattern: string;
+    solutionCode: string;
+    explanation: string;
+  }>>([{
+    challengeDescription: "Écrivez une fonction pgcd(a, b) récursive.",
+    starterCode: "def pgcd(a, b):\n    # Votre code",
+    validationPattern: "PGCD(18, 12) = 6",
+    solutionCode: "def pgcd(a, b):\n    return a if b == 0 else pgcd(b, a % b)",
+    explanation: "Algorithme d'Euclide récursif standard."
+  }]);
+
+  const [creatorMsg, setCreatorMsg] = useState<string | null>(null);
+
+  // Initial Fetching
+  const fetchQuizzesAndStats = async () => {
+    setIsLoading(true);
+    try {
+      const headers: any = {};
+      if (currentUser.grade) {
+        headers["x-user-grade"] = currentUser.grade;
+      }
+      if (currentUser.section) {
+        headers["x-user-section"] = currentUser.section;
+      }
+      headers["x-user-role"] = currentUser.role;
+
+      const qRes = await fetch("/api/quizzes", { headers });
+      const qData = await qRes.json();
+      setQuizzes(qData);
+
+      const tipsRes = await fetch("/api/quizzes/tips");
+      if (tipsRes.ok) {
+        const tipsData = await tipsRes.json();
+        setQuizTips(tipsData);
+      }
+
+      if (currentUser.role === "student") {
+        const sRes = await fetch(`/api/quizzes/performance/${currentUser.id}`);
+        const sData = await sRes.json();
+        setPerformance(sData);
+      }
+    } catch (err) {
+      console.error("Erreur de chargement des questionnaires :", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchQuizzesAndStats();
+  }, [currentUser]);
+
+  // Horizontal Top Filter Bar States
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedChapterFilter, setSelectedChapterFilter] = useState("Tous");
+  const [selectedTrimFilter, setSelectedTrimFilter] = useState("Tous");
+  const [selectedTypeFilter, setSelectedTypeFilter] = useState("Tous");
+
+  const allChapters = Array.from(
+    new Set(
+      quizzes
+        .map((q) => String(q.chapterTitle || q.chapter || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  // Filter quizzes based on search query, chapter, trimestre, type, and target audience accessibility
+  const filteredQuizzes = quizzes.filter((quiz) => {
+    // Exclude obsolete format
+    const titleLower = String(quiz.title || "").toLowerCase();
+    if (
+      quiz.id === "qz_1" || 
+      titleLower.includes("structures de contrôle & récursivité") || 
+      titleLower.includes("évaluation : struct") || 
+      titleLower.includes("evaluation : struct") ||
+      (quiz.grade === "4ème Année (Bac Info)" && titleLower.includes("struct") && (quiz.creatorName || "").includes("Chaouch"))
+    ) {
+      return false;
+    }
+
+
+
+    // Search query
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      const titleMatch = (quiz.title || "").toLowerCase().includes(q);
+      const chapterMatch = (quiz.chapterTitle || quiz.chapter || "").toLowerCase().includes(q);
+      const creatorMatch = (quiz.creatorName || "").toLowerCase().includes(q);
+      const gradeMatch = (quiz.grade || "").toLowerCase().includes(q);
+      const sectionMatch = (quiz.section || "").toLowerCase().includes(q);
+      if (!titleMatch && !chapterMatch && !creatorMatch && !gradeMatch && !sectionMatch) {
+        return false;
+      }
+    }
+
+    // Trimestre
+    const activeTrim = selectedTrimFilter !== "Tous" && selectedTrimFilter !== "ALL" 
+      ? selectedTrimFilter 
+      : (selectedTrimestre && selectedTrimestre !== "ALL" ? selectedTrimestre : "Tous");
+    if (activeTrim && activeTrim !== "Tous" && activeTrim !== "ALL") {
+      const quizTrim = quiz.trimestre || (
+        quiz.id === "qz_2" ? "2eme trimestre" :
+        quiz.id === "qz_3" ? "3eme trimestre" :
+        "1ere trimestre"
+      );
+      if (normalizeTrimestre(quizTrim) !== normalizeTrimestre(activeTrim)) {
+        return false;
+      }
+    }
+
+    // Chapter
+    const qChap = quiz.chapterTitle || quiz.chapter || "";
+    if (selectedChapterFilter !== "Tous" && qChap !== selectedChapterFilter) {
+      return false;
+    }
+
+    // Type
+    if (selectedTypeFilter !== "Tous" && quiz.type !== selectedTypeFilter) {
+      return false;
+    }
+
+    return true;
+  });
+
+  // Restart active quiz inputs when quiz changes
+  useEffect(() => {
+    if (selectedQuiz) {
+      setUserAnswers({});
+      setQFeedback({});
+      setSubmissionSuccess(null);
+      setLastSubmission(null);
+      
+      // Setup default starter drafts for coding challenges
+      if (selectedQuiz.type === "coding_challenge") {
+        const drafts: { [key: number]: string } = {};
+        selectedQuiz.questions.forEach((q, idx) => {
+          drafts[idx] = q.starterCode || "";
+        });
+        setCodeDrafts(drafts);
+        setCodeOutputs({});
+      }
+    }
+  }, [selectedQuiz]);
+
+  // Submit dynamic quiz to server
+  const handlePublishQuiz = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTitle.trim()) {
+      alert("Veuillez saisir un titre pour l'évaluation.");
+      return;
+    }
+
+    let finalQuestions: any[] = [];
+    if (newType === "qcm") {
+      finalQuestions = mcqQuestions.map(q => ({
+        questionText: q.questionText,
+        options: q.options.filter(opt => opt.trim() !== ""),
+        correctAnswerIndex: q.correctAnswerIndex,
+        explanation: q.explanation
+      }));
+    } else if (newType === "fllblanks") {
+      finalQuestions = fibQuestions.map(q => ({
+        questionText: q.questionText,
+        correctAnswers: q.correctAnswers.map(ans => ans.trim()),
+        explanation: q.explanation
+      }));
+    } else {
+      finalQuestions = codingQuestions;
+    }
+
+    try {
+      const res = await fetch("/api/quizzes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: newTitle,
+          type: newType,
+          grade: newGrade,
+          section: newSection,
+          sections: newSections,
+          difficulty: newDifficulty,
+          creatorName: currentUser.fullName,
+          questions: finalQuestions
+        })
+      });
+      const data = await res.json();
+      setCreatorMsg("✅ L'évaluation interactive a été configurée et publiée avec succès !");
+      
+      // Reset form variables
+      setNewTitle("");
+      setMcqQuestions([{ questionText: "", options: ["", ""], correctAnswerIndex: 0, explanation: "" }]);
+      setFibQuestions([{ questionText: "La fonction [print] affiche du texte en Python.", correctAnswers: ["print"], explanation: "" }]);
+      setCodingQuestions([{
+        challengeDescription: "Écrivez une fonction pgcd(a, b) récursive.",
+        starterCode: "def pgcd(a, b):\n    # Votre code",
+        validationPattern: "PGCD(18, 12) = 6",
+        solutionCode: "def pgcd(a, b):\n    return a if b == 0 else pgcd(b, a % b)",
+        explanation: "Algorithme d'Euclide récursif standard."
+      }]);
+
+      await fetchQuizzesAndStats();
+      setTimeout(() => setCreatorMsg(null), 5500);
+    } catch (err) {
+      console.error("Publisher failed:", err);
+      alert("Impossible d'ajouter le QCM.");
+    }
+  };
+
+  const handleDeleteQuiz = async (quizId: string) => {
+    if (!confirm("Voulez-vous vraiment supprimer définitivement cette évaluation ?")) return;
+    try {
+      await fetch(`/api/quizzes/${quizId}`, { method: "DELETE" });
+      if (selectedQuiz?.id === quizId) {
+        setSelectedQuiz(null);
+      }
+      await fetchQuizzesAndStats();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Run student code using internal piston environment or mock python validator
+  const handleTestRunCode = async (qIndex: number) => {
+    const code = codeDrafts[qIndex] || "";
+    if (!code.trim()) return;
+
+    setCodeOutputs(prev => ({
+      ...prev,
+      [qIndex]: { output: "Compilation et exécution du script en cours...", running: true, success: null }
+    }));
+
+    try {
+      const runRes = await fetch("/api/piston/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code })
+      });
+      const runData = await runRes.json();
+      
+      const realOutput = runData.output || "";
+      const validation = selectedQuiz?.questions[qIndex]?.validationPattern || "";
+      
+      // Check if output matches expected pattern
+      const isCorrect = validation 
+        ? realOutput.trim().toLowerCase().includes(validation.trim().toLowerCase()) 
+        : true;
+
+      setCodeOutputs(prev => ({
+        ...prev,
+        [qIndex]: { 
+          output: realOutput || "Exécution terminée sans sortie sur le flux standard.", 
+          running: false, 
+          success: isCorrect 
+        }
+      }));
+
+      // Set user answer
+      setUserAnswers(prev => ({
+        ...prev,
+        [qIndex]: code
+      }));
+
+      // Update feedback
+      setQFeedback(prev => ({
+        ...prev,
+        [qIndex]: { 
+          correct: isCorrect, 
+          checked: true, 
+          msg: isCorrect 
+            ? "Félicitations ! Le programme fonctionne et l'affichage correspond exactement au schéma de test attendu."
+            : `Échec du test de conformité. Votre script a bien renvoyé une valeur, mais l'affichage sur la console finale ne contient pas le motif requis: "${validation}".` 
+        }
+      }));
+
+    } catch (err) {
+      console.error("Python engine error:", err);
+      setCodeOutputs(prev => ({
+        ...prev,
+        [qIndex]: { 
+          output: "Erreur réseau. Impossible de contacter l'interpréteur de bac pratique Python.", 
+          running: false, 
+          success: false 
+        }
+      }));
+    }
+  };
+
+  // Check answers of QCM questions
+  const handleCheckQcmAnswer = (qIndex: number, correctIdx: number) => {
+    const selected = userAnswers[qIndex];
+    if (selected === undefined) {
+      alert("Saisissez d'abord une proposition de réponse.");
+      return;
+    }
+    const isCorrect = Number(selected) === correctIdx;
+    setQFeedback(prev => ({
+      ...prev,
+      [qIndex]: { checked: true, correct: isCorrect }
+    }));
+  };
+
+  // Check answers of FIB (Fill-in-the-Blanks) questions
+  const handleCheckFibAnswer = (qIndex: number, expectedAnswers: string[]) => {
+    const answersObj = userAnswers[qIndex] || {};
+    let isAllCorrect = true;
+    
+    expectedAnswers.forEach((expected, i) => {
+      const userVal = (answersObj[i] || "").trim().toLowerCase();
+      if (userVal !== expected.trim().toLowerCase()) {
+        isAllCorrect = false;
+      }
+    });
+
+    setQFeedback(prev => ({
+      ...prev,
+      [qIndex]: { checked: true, correct: isAllCorrect }
+    }));
+  };
+
+  // Final submit score to tracking endpoints
+  const handleConfirmSubmitQuiz = async () => {
+    if (!selectedQuiz) return;
+
+    const totalQs = selectedQuiz.questions.length;
+    let correctCount = 0;
+    const finalFeedback: { [qIndex: number]: { correct: boolean; checked: boolean; msg?: string } } = {};
+
+    selectedQuiz.questions.forEach((q, idx) => {
+      if (selectedQuiz.type === "qcm") {
+        const ans = userAnswers[idx];
+        const isCorrect = ans !== undefined && Number(ans) === q.correctAnswerIndex;
+        if (isCorrect) {
+          correctCount++;
+        }
+        finalFeedback[idx] = { checked: true, correct: isCorrect };
+      } else if (selectedQuiz.type === "fllblanks") {
+        const answersObj = userAnswers[idx] || {};
+        let isCorrect = true;
+        q.correctAnswers?.forEach((expected, i) => {
+          const userVal = (answersObj[i] || "").trim().toLowerCase();
+          if (userVal !== expected.trim().toLowerCase()) isCorrect = false;
+        });
+        if (isCorrect) {
+          correctCount++;
+        }
+        finalFeedback[idx] = { checked: true, correct: isCorrect };
+      } else if (selectedQuiz.type === "coding_challenge") {
+        const isCorrect = !!qFeedback[idx]?.correct;
+        if (isCorrect) {
+          correctCount++;
+        }
+        finalFeedback[idx] = { checked: true, correct: isCorrect };
+      }
+    });
+
+    const finalScore = Math.round((correctCount / totalQs) * 100);
+
+    setIsSubmittingScore(true);
+    try {
+      const res = await fetch("/api/quizzes/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          quizId: selectedQuiz.id,
+          quizTitle: selectedQuiz.title,
+          quizType: selectedQuiz.type,
+          score: finalScore,
+          totalQuestions: totalQs,
+          correctCount,
+          details: { userAnswers }
+        })
+      });
+      const data = await res.json();
+      setSubmissionSuccess(data.msg);
+      setQFeedback(finalFeedback);
+      setLastSubmission({
+        score: finalScore,
+        totalQuestions: totalQs,
+        correctCount,
+        quizTitle: selectedQuiz.title,
+        quizType: selectedQuiz.type
+      });
+
+      // Celebrate perfect score with premium multi-stage confetti
+      if (finalScore === 100) {
+        confetti({
+          particleCount: 150,
+          spread: 80,
+          origin: { y: 0.6 }
+        });
+        setTimeout(() => {
+          confetti({
+            particleCount: 60,
+            angle: 60,
+            spread: 60,
+            origin: { x: 0, y: 0.8 }
+          });
+        }, 200);
+        setTimeout(() => {
+          confetti({
+            particleCount: 60,
+            angle: 120,
+            spread: 60,
+            origin: { x: 1, y: 0.8 }
+          });
+        }, 400);
+      }
+      
+      // Update local stats dashboard
+      await fetchQuizzesAndStats();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSubmittingScore(false);
+    }
+  };
+
+  // Helper parser for Fill in the Blanks question layout to make text input fields
+  const renderFibQuestionInput = (qIndex: number, str: string, correctAnswers: string[]) => {
+    // Splits text around bracket expressions e.g. "Pour définir [print] ou [input]"
+    const parts = str.split(/\[.*?\]/);
+    const isQChecked = qFeedback[qIndex]?.checked;
+    
+    return (
+      <div className="flex flex-wrap items-center gap-3 text-xs sm:text-sm text-slate-800 leading-loose font-medium my-3 p-4 bg-slate-50/90 border border-slate-200/70 rounded-2xl">
+        {parts.map((part, partIdx) => {
+          const isLast = partIdx === parts.length - 1;
+          const expectedAnswer = correctAnswers[partIdx] || "";
+          const userAnswer = (userAnswers[qIndex]?.[partIdx] || "").trim();
+          const isCorrect = userAnswer.toLowerCase() === expectedAnswer.toLowerCase();
+
+          let inputStyleClasses = "px-3 py-1.5 border rounded-xl text-slate-900 font-mono text-xs focus:outline-none focus:ring-2 min-w-[8.5rem] w-36 text-center shadow-2xs transition-all mx-1.5";
+          if (isQChecked) {
+            if (isCorrect) {
+              inputStyleClasses += " bg-emerald-50 border-emerald-400 text-emerald-800 font-bold cursor-not-allowed";
+            } else {
+              inputStyleClasses += " bg-red-50 border-red-400 text-red-800 font-bold cursor-not-allowed";
+            }
+          } else {
+            inputStyleClasses += " bg-[#EEF2F6] border-[#CBD5E1] focus:ring-[#10B981]";
+          }
+
+          return (
+            <React.Fragment key={partIdx}>
+              <span className="py-1">{part}</span>
+              {!isLast && (
+                <div className="inline-flex flex-col sm:flex-row items-center gap-2 my-1">
+                  <input
+                    type="text"
+                    disabled={isQChecked}
+                    placeholder={isQChecked ? "" : "Écrivez ici..."}
+                    value={userAnswers[qIndex]?.[partIdx] || ""}
+                    onChange={(e) => {
+                      const ans = userAnswers[qIndex] || {};
+                      ans[partIdx] = e.target.value;
+                      setUserAnswers({ ...userAnswers, [qIndex]: ans });
+                    }}
+                    className={inputStyleClasses}
+                  />
+                  {isQChecked && !isCorrect && (
+                    <span className="text-[10.5px] font-bold bg-emerald-100 text-emerald-850 px-2 py-1 rounded-lg border border-emerald-250 font-mono shadow-2xs">
+                      Attendu : {expectedAnswer}
+                    </span>
+                  )}
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6 bg-[#FFFFFF] text-[#1F2937] leading-relaxed">
+      
+      {/* Mode Toggles for Instructors */}
+      {currentUser.role === "admin" && (
+        <div className="bg-slate-100 p-1 rounded-xl flex items-center gap-1 text-xs font-semibold max-w-max">
+          <button
+            onClick={() => setActiveTab("resoudre")}
+            className={`px-4 py-2 rounded-lg transition-all cursor-pointer ${
+              activeTab === "resoudre" 
+                ? "bg-[#2563EB] text-white shadow-sm" 
+                : "text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            📊 Résolution étudiant
+          </button>
+          <button
+            onClick={() => setActiveTab("creer")}
+            className={`px-4 py-2 rounded-lg transition-all cursor-pointer ${
+              activeTab === "creer" 
+                ? "bg-[#2563EB] text-white shadow-sm" 
+                : "text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            🛠️ Zone Créateur Instructeur
+          </button>
+        </div>
+      )}
+
+      {activeTab === "resoudre" && (
+        <div className="space-y-6">
+
+          {/* 1. Barre de Filtres Horizontale (En haut de la section) */}
+          <div className="flex flex-wrap items-center justify-between gap-4 w-full bg-white dark:bg-slate-800 p-4 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 mb-6">
+            <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[280px]">
+              {/* Champ Recherche */}
+              <div className="relative flex-1 min-w-[220px] max-w-md">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+                <input
+                  type="text"
+                  placeholder="Rechercher une évaluation, chapitre, notion..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-8 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-xs sm:text-sm font-medium text-slate-800 dark:text-slate-100 placeholder-slate-400 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none transition-all"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {/* Sélecteur de Chapitre */}
+              {allChapters.length > 0 && (
+                <select
+                  value={selectedChapterFilter}
+                  onChange={(e) => setSelectedChapterFilter(e.target.value)}
+                  className="px-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500/20 outline-none cursor-pointer"
+                >
+                  <option value="Tous">Tous les Chapitres</option>
+                  {allChapters.map((chap, idx) => (
+                    <option key={idx} value={chap}>{chap}</option>
+                  ))}
+                </select>
+              )}
+
+              {/* Sélecteur de Trimestre */}
+              <select
+                value={selectedTrimFilter}
+                onChange={(e) => setSelectedTrimFilter(e.target.value)}
+                className="px-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500/20 outline-none cursor-pointer"
+              >
+                <option value="Tous">Tous les Trimestres</option>
+                <option value="1ere trimestre">1er Trimestre</option>
+                <option value="2eme trimestre">2ème Trimestre</option>
+                <option value="3eme trimestre">3ème Trimestre</option>
+                <option value="revision">Période de Révision</option>
+              </select>
+
+              {/* Sélecteur de Type */}
+              <select
+                value={selectedTypeFilter}
+                onChange={(e) => setSelectedTypeFilter(e.target.value)}
+                className="px-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500/20 outline-none cursor-pointer"
+              >
+                <option value="Tous">Tous les Formats</option>
+                <option value="qcm">QCM interactif</option>
+                <option value="fllblanks">Texte à trous (Remplissage)</option>
+                <option value="coding_challenge">Défi Code Python</option>
+              </select>
+
+              {/* Bouton Réinitialiser si filtre actif */}
+              {(searchQuery || selectedChapterFilter !== "Tous" || selectedTrimFilter !== "Tous" || selectedTypeFilter !== "Tous") && (
+                <button
+                  onClick={() => {
+                    setSearchQuery("");
+                    setSelectedChapterFilter("Tous");
+                    setSelectedTrimFilter("Tous");
+                    setSelectedTypeFilter("Tous");
+                  }}
+                  className="px-3 py-2 text-xs font-bold text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white bg-slate-100 dark:bg-slate-700/50 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw size={12} />
+                  Réinitialiser
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="px-3 py-1 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 rounded-full text-xs font-extrabold flex items-center gap-1.5">
+                <BookOpen size={13} />
+                {filteredQuizzes.length} évaluation{filteredQuizzes.length > 1 ? "s" : ""} disponible{filteredQuizzes.length > 1 ? "s" : ""}
+              </span>
+            </div>
+          </div>
+
+          {/* 2. Catalogue des Quiz : Grille Aérée Large (quand aucun quiz n'est actif) */}
+          {!selectedQuiz ? (
+            <div className="space-y-6">
+              {/* Rapport de performance en bandeau synthétique pour l'élève */}
+              {currentUser.role === "student" && performance && (
+                <div className="border border-slate-200 dark:border-slate-700 rounded-2xl p-5 bg-gradient-to-r from-slate-50 to-emerald-50/30 dark:from-slate-800 dark:to-emerald-950/20 flex flex-col md:flex-row items-center justify-between gap-6 shadow-xs text-left">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/20">
+                      <BarChart2 size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-[#0F1E36] dark:text-white flex items-center gap-2">
+                        Votre Progression aux Évaluations Interactives
+                        <span className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200 font-extrabold px-2 py-0.5 rounded-full">
+                          {currentUser.grade || '4ème'} {currentUser.section && `• ${currentUser.section}`}
+                        </span>
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                        {performance.completedQuizzesCount} évaluation{performance.completedQuizzesCount > 1 ? "s" : ""} validée{performance.completedQuizzesCount > 1 ? "s" : ""} • Précision moyenne calculée : <strong className="text-emerald-600">{performance.averageScore}%</strong>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="w-full md:w-64 space-y-1.5">
+                    <div className="flex justify-between text-xs font-bold text-slate-700 dark:text-slate-300">
+                      <span>Précision globale</span>
+                      <span className="font-mono text-emerald-600">{performance.averageScore}%</span>
+                    </div>
+                    <div className="h-2.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                      <div 
+                        className="bg-gradient-to-r from-emerald-400 to-[#10B981] h-full rounded-full transition-all duration-500"
+                        style={{ width: `${performance.averageScore || 0}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {filteredQuizzes.length === 0 ? (
+                <div className="border border-slate-200 dark:border-slate-700 rounded-2xl p-12 text-center bg-white dark:bg-slate-800 space-y-4">
+                  <HelpCircle className="mx-auto text-slate-300 dark:text-slate-600 stroke-[1.5]" size={40} />
+                  <h3 className="text-slate-800 dark:text-white font-extrabold text-base">
+                    Aucune évaluation disponible pour cette sélection
+                  </h3>
+                  <p className="text-slate-500 dark:text-slate-400 text-xs max-w-md mx-auto leading-relaxed">
+                    Essayez de réinitialiser vos critères de recherche pour afficher les autres quiz proposés sur la plateforme.
+                  </p>
+                  <button
+                    onClick={() => {
+                      setSearchQuery("");
+                      setSelectedChapterFilter("Tous");
+                      setSelectedTrimFilter("Tous");
+                      setSelectedTypeFilter("Tous");
+                    }}
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900 font-bold rounded-xl text-xs inline-flex items-center gap-2 transition-all cursor-pointer shadow-sm"
+                  >
+                    <RefreshCw size={12} />
+                    Réinitialiser les filtres
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full">
+                  {filteredQuizzes.map((quiz) => {
+                    const isLocked = currentUser.role === "student" && !isUserAuthorized(currentUser.activeBadge || currentUser.badge || currentUser.status || 'Freemium', quiz.allowedBadges || quiz.allowedTiers || quiz.targetTiers || [quiz.requiredBadge || (quiz.isPremium ? 'ESSENTIEL' : 'FREEMIUM')]);
+
+                    return (
+                      <div
+                        key={quiz.id}
+                        className="quiz-card student-card-bg relative overflow-hidden rounded-2xl border border-gray-200 shadow-sm hover:shadow-md transition-all flex flex-col justify-between text-left bg-cover bg-center bg-no-repeat group"
+                        style={{
+                          backgroundImage: "url('/hexagon-pattern.jpg')"
+                        }}
+                      >
+                        <div className="p-5 bg-white/30 backdrop-blur-[1px] dark:bg-slate-900/40 h-full flex flex-col justify-between space-y-4">
+                          <div className="space-y-3">
+                            {/* Badges d'en-tête de carte */}
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {(quiz.chapterTitle || quiz.chapter) && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-white/80 text-gray-700 border border-gray-300">
+                                  📖 {quiz.chapterTitle || quiz.chapter}
+                                </span>
+                              )}
+                              <span className="text-xs px-2 py-0.5 rounded bg-purple-100/90 text-purple-700 font-bold uppercase">
+                                {quiz.type === "qcm" ? "QCM INTERACTIF" : quiz.type === "fllblanks" ? "TEXTE À TROUS" : "DÉFI PYTHON"}
+                              </span>
+                              <span className="text-xs px-2 py-0.5 rounded bg-gray-100/80 text-gray-600 font-medium">
+                                {quiz.difficulty}
+                              </span>
+                              {/* Rendu des badges dynamiques autorisés */}
+                              {(() => {
+                                const badges: string[] = Array.isArray(quiz.allowedBadges) && quiz.allowedBadges.length > 0
+                                  ? quiz.allowedBadges
+                                  : Array.isArray(quiz.allowedTiers) && quiz.allowedTiers.length > 0
+                                  ? quiz.allowedTiers
+                                  : Array.isArray(quiz.targetTiers) && quiz.targetTiers.length > 0
+                                  ? quiz.targetTiers
+                                  : [quiz.requiredBadge || (quiz.isPremium ? 'ESSENTIEL' : 'FREEMIUM')];
+
+                                const uniqueBadges = Array.from(new Set(badges.map((b: string) => (b || '').trim()).filter(Boolean)));
+
+                                return uniqueBadges.map((badge: string) => renderBadge(badge));
+                              })()}
+                            </div>
+
+                            {/* Titre du Quiz */}
+                            <div className="pt-1">
+                              <h3 className="text-lg font-bold text-emerald-700 dark:text-emerald-400 leading-snug">
+                                {quiz.title}
+                              </h3>
+                            </div>
+                          </div>
+
+                          {/* Bouton d'action CTA */}
+                          <div className="pt-3 border-t border-gray-200/60 flex items-center justify-between gap-3">
+                            {isLocked ? (
+                              <button
+                                onClick={() => {
+                                  setSelectedQuizForDeniedModal(quiz);
+                                  setIsDeniedModalOpen(true);
+                                }}
+                                className="w-full py-2.5 px-4 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-sm flex items-center justify-center gap-2"
+                              >
+                                <Lock size={14} />
+                                <span>🔒 Accès refusé</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setSelectedQuiz(quiz)}
+                                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-xs active:scale-[0.99]"
+                              >
+                                <span>►</span>
+                                <span>Passer l'évaluation</span>
+                              </button>
+                            )}
+
+                          {currentUser.role === "admin" && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteQuiz(quiz.id);
+                              }}
+                              title="Supprimer ce quiz"
+                              className="p-2.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-xl transition-colors cursor-pointer"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* 3. Mode Passation de Quiz (Quiz Actif) : Structure en 2 colonnes */
+            <div className="space-y-6">
+              {/* Barre de retour vers le catalogue */}
+              <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm text-left">
+                <button
+                  onClick={() => setSelectedQuiz(null)}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-white font-bold rounded-lg text-xs transition-colors cursor-pointer shadow-2xs"
+                >
+                  <ArrowLeft size={14} />
+                  <span>← Retour au catalogue des quiz</span>
+                </button>
+
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-500 font-medium">Évaluation sélectionnée :</span>
+                  <span className="text-xs font-extrabold text-[#0F1E36] dark:text-white truncate max-w-xs sm:max-w-md">
+                    {selectedQuiz.title}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                
+                {/* Colonne Gauche (30% / lg:col-span-4) : Liste réduite & stats */}
+                <div className="lg:col-span-4 space-y-6">
+                  
+                  {/* Performance student card */}
+                  {currentUser.role === "student" && performance && (
+                    <div className="border border-[#E5E7EB] rounded-2xl p-5 bg-[#F9FAFB] space-y-4 shadow-2xs text-left">
+                      <div className="flex items-center justify-between border-b border-[#E5E7EB] pb-3">
+                        <h3 className="font-bold text-xs text-[#0F1E36] uppercase tracking-wider flex items-center gap-2">
+                          <BarChart2 size={15} className="text-[#10B981]" /> Vos Statistiques
+                        </h3>
+                        <span className="text-[10px] bg-slate-100 text-slate-800 font-extrabold px-2.5 py-1 rounded-full">
+                          {currentUser.grade || '4ème'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between p-3 bg-white border border-[#E5E7EB] rounded-xl shadow-2xs">
+                        <div>
+                          <span className="text-[10px] text-gray-400 font-semibold uppercase block">Validés</span>
+                          <span className="font-mono text-base font-bold text-indigo-600">
+                            {performance.completedQuizzesCount} évaluation{performance.completedQuizzesCount > 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-[10px] text-gray-400 font-semibold uppercase block">Précision</span>
+                          <span className="font-mono text-base font-bold text-emerald-600">
+                            {performance.averageScore}%
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Liste compacte des quiz disponibles */}
+                  <div className="border border-[#E5E7EB] rounded-2xl p-5 bg-white space-y-3 shadow-2xs text-left">
+                    <h3 className="font-bold text-xs text-[#0F1E36] uppercase tracking-wider flex items-center gap-2 border-b border-gray-100 pb-3">
+                      <BookOpen size={15} className="text-[#10B981]" /> Liste des Évaluations ({filteredQuizzes.length})
+                    </h3>
+
+                    <div className="space-y-2.5 max-h-[520px] overflow-y-auto pr-1">
+                      {filteredQuizzes.map((quiz) => {
+                        const isSelected = selectedQuiz?.id === quiz.id;
+                        return (
+                          <div
+                            key={quiz.id}
+                            onClick={() => setSelectedQuiz(quiz)}
+                            className={`p-3 border rounded-xl text-left transition-all cursor-pointer flex justify-between items-center ${
+                              isSelected 
+                                ? "border-[#10B981] bg-emerald-50/40 shadow-xs ring-1 ring-[#10B981]/20" 
+                                : "border-[#E5E7EB] hover:bg-slate-50"
+                            }`}
+                          >
+                            <div className="space-y-1 flex-1 min-w-0 pr-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase ${
+                                  quiz.type === "qcm" ? "bg-blue-50 text-blue-700 border border-blue-200" :
+                                  quiz.type === "fllblanks" ? "bg-amber-50 text-amber-700 border border-amber-200" :
+                                  "bg-purple-50 text-purple-700 border border-purple-200"
+                                }`}>
+                                  {quiz.type === "qcm" ? "QCM" : quiz.type === "fllblanks" ? "Remplissage" : "Code"}
+                                </span>
+                                {quiz.chapterTitle && (
+                                  <span className="text-[9px] text-blue-700 truncate max-w-[120px]">
+                                    {quiz.chapterTitle}
+                                  </span>
+                                )}
+                              </div>
+                              <h4 className="text-xs font-bold text-[#0F1E36] truncate">
+                                {quiz.title}
+                              </h4>
+                            </div>
+                            <ChevronRight size={14} className={isSelected ? "text-[#10B981]" : "text-gray-300"} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Colonne Droite (70% / lg:col-span-8) : Espace de travail questions & réponses */}
+                <div className="lg:col-span-8 space-y-6">
+                  {currentUser.role === "student" && !isUserAuthorized(currentUser.activeBadge || currentUser.badge || currentUser.status || 'Freemium', selectedQuiz.allowedBadges || selectedQuiz.allowedTiers || selectedQuiz.targetTiers || [selectedQuiz.requiredBadge || (selectedQuiz.isPremium ? 'ESSENTIEL' : 'FREEMIUM')]) ? (
+                    <div className="border border-amber-200 rounded-2xl p-8 bg-amber-50/20 text-center space-y-4 max-w-md mx-auto">
+                      <div className="mx-auto w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center text-amber-600">
+                        <Lock size={20} />
+                      </div>
+                      <h3 className="text-base font-extrabold text-[#0F1E36]">Accès restreint pour cette évaluation</h3>
+                      <p className="text-xs text-gray-500 leading-relaxed">
+                        Ce quiz interactif ({selectedQuiz.title}) nécessite un forfait spécifique. Mettez à niveau votre compte pour débloquer l'accès complet.
+                      </p>
+                      <button
+                        onClick={() => {
+                          setSelectedQuizForDeniedModal(selectedQuiz);
+                          setIsDeniedModalOpen(true);
+                        }}
+                        className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-sm flex items-center gap-2 mx-auto"
+                      >
+                        <Lock size={14} />
+                        <span>🔒 Voir les conditions d'accès</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="border border-[#E5E7EB] rounded-2xl p-6 sm:p-8 bg-white space-y-8 shadow-xs">
+                    
+                      {/* En-tête du quiz actif */}
+                      <div className="border-b border-[#E5E7EB] pb-5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <div className="space-y-1.5 text-left">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="px-2.5 py-1 bg-slate-100 border border-slate-300 text-slate-700 rounded-lg text-[10px] font-extrabold uppercase tracking-wide">
+                              {selectedQuiz.difficulty}
+                            </span>
+                            {(selectedQuiz.chapterTitle || selectedQuiz.chapter) && (
+                              <span className="px-2.5 py-1 bg-blue-50 border border-blue-200 text-blue-800 rounded-lg text-[10px] font-bold">
+                                📖 Chapitre : {selectedQuiz.chapterTitle || selectedQuiz.chapter}
+                              </span>
+                            )}
+                          </div>
+                          <h2 className="text-[#0F1E36] font-extrabold text-lg sm:text-xl tracking-tight">
+                            {selectedQuiz.title}
+                          </h2>
+                        </div>
+
+                        {currentUser.role === "admin" && (
+                          <button
+                            onClick={() => handleDeleteQuiz(selectedQuiz.id)}
+                            className="text-xs bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 px-3.5 py-2 rounded-xl font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                          >
+                            <Trash2 size={13} />
+                            Supprimer ce devoir
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Questions Body Wrapper */}
+                      <div className="space-y-8">
+                        {selectedQuiz.questions.map((q, qIdx) => {
+                          const feedback = qFeedback[qIdx];
+                          const isQChecked = feedback?.checked;
+                          const isQCorrect = feedback?.correct;
+
+                          return (
+                            <div key={qIdx} className="p-6 md:p-8 border border-slate-200/80 rounded-2xl space-y-6 bg-white text-left shadow-2xs transition-all">
+                              <div className="flex items-start gap-3.5">
+                                <span className="w-6 h-6 rounded-full bg-slate-900 text-white font-mono text-xs flex items-center justify-center font-bold shrink-0 mt-0.5 shadow-2xs">
+                                  {qIdx + 1}
+                                </span>
+                                
+                                {/* MCQ / QCM Rendering */}
+                                {selectedQuiz.type === "qcm" && (
+                                  <div className="space-y-5 flex-1 min-w-0">
+                                    <p className="text-sm font-bold text-[#0F1E36] leading-relaxed">
+                                      {q.questionText}
+                                    </p>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 mt-4">
+                                      {q.options?.map((opt, oIdx) => {
+                                        const isSelected = userAnswers[qIdx] === oIdx;
+                                        const isCorrectOption = oIdx === q.correctAnswerIndex;
+                                        
+                                        let styleClasses = "";
+                                        if (isQChecked) {
+                                          if (isCorrectOption) {
+                                            styleClasses = "border-emerald-500 bg-emerald-50 text-emerald-900 font-semibold shadow-xs";
+                                          } else if (isSelected) {
+                                            styleClasses = "border-red-500 bg-red-50 text-red-900 shadow-xs";
+                                          } else {
+                                            styleClasses = "border-slate-200 text-slate-400 opacity-60";
+                                          }
+                                        } else {
+                                          styleClasses = isSelected
+                                            ? "border-slate-800 bg-slate-900 text-white shadow-xs"
+                                            : "border-[#E5E7EB] hover:bg-slate-50 text-[#374151]";
+                                        }
+
+                                        return (
+                                          <div
+                                            key={oIdx}
+                                            onClick={() => {
+                                              if (isQChecked) return;
+                                              setUserAnswers(prev => ({ ...prev, [qIdx]: oIdx }));
+                                            }}
+                                            className={`p-4 border rounded-xl text-xs sm:text-sm transition-all cursor-pointer leading-relaxed flex items-start gap-3 ${styleClasses} ${isQChecked ? "cursor-not-allowed" : ""}`}
+                                          >
+                                            <span className="font-mono text-xs uppercase font-bold shrink-0 mt-0.5">
+                                              [{String.fromCharCode(65 + oIdx)}]
+                                            </span>
+                                            <span className="font-medium">{opt}</span>
+                                            {isQChecked && isCorrectOption && (
+                                              <span className="ml-auto text-[10px] font-bold text-emerald-600 bg-emerald-100/70 px-2 py-0.5 rounded uppercase tracking-wider shrink-0">
+                                                Correct
+                                              </span>
+                                            )}
+                                            {isQChecked && isSelected && !isCorrectOption && (
+                                              <span className="ml-auto text-[10px] font-bold text-red-600 bg-red-100/70 px-2 py-0.5 rounded uppercase tracking-wider shrink-0">
+                                                Votre choix
+                                              </span>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+
+                                    {!isQChecked && (
+                                      <div className="pt-2">
+                                        <button
+                                          onClick={() => handleCheckQcmAnswer(qIdx, q.correctAnswerIndex ?? 0)}
+                                          className="text-xs uppercase tracking-wider font-extrabold bg-[#10B981] hover:bg-emerald-600 text-white px-4 py-2.5 rounded-xl cursor-pointer inline-flex items-center gap-2 transition-all shadow-2xs"
+                                        >
+                                          Vérifier le choix
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Fill-in-the-Blanks FIB Rendering */}
+                                {selectedQuiz.type === "fllblanks" && (
+                                  <div className="space-y-5 flex-1 min-w-0">
+                                    <p className="text-xs sm:text-sm font-bold text-[#0F1E36] leading-relaxed border-b border-gray-100 pb-2">
+                                      Remplissez les espaces vides pour rendre l'affirmation correcte :
+                                    </p>
+
+                                    {/* Parser field */}
+                                    {renderFibQuestionInput(qIdx, q.questionText || "", q.correctAnswers || [])}
+
+                                    {!isQChecked && (
+                                      <div className="pt-2">
+                                        <button
+                                          onClick={() => handleCheckFibAnswer(qIdx, q.correctAnswers || [])}
+                                          className="text-xs uppercase tracking-wider font-extrabold bg-[#10B981] hover:bg-emerald-600 text-white px-4 py-2.5 rounded-xl cursor-pointer inline-flex items-center gap-2 transition-all shadow-2xs"
+                                        >
+                                          Valider la saisie
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* Coding Challenge Python Rendering */}
+                                {selectedQuiz.type === "coding_challenge" && (
+                                  <div className="space-y-5 flex-1 min-w-0">
+                                    <div className="space-y-2">
+                                      <h4 className="text-xs sm:text-sm font-bold text-[#0F1E36] flex items-center gap-1.5">
+                                        <Code size={15} className="text-[#10B981]" /> Défi pratique à programmer :
+                                      </h4>
+                                      <p className="text-xs sm:text-sm text-slate-700 leading-relaxed bg-[#F8FAFC] border border-slate-200 p-4 rounded-xl text-left whitespace-pre-line shadow-2xs">
+                                        {q.challengeDescription}
+                                      </p>
+                                    </div>
+
+                                    <div className="space-y-2 text-left pt-1">
+                                      <span className="text-[10px] sm:text-xs text-gray-500 font-bold uppercase tracking-wider block">
+                                        Éditeur Scratchpad Python :
+                                      </span>
+                                      <textarea
+                                        value={codeDrafts[qIdx] || ""}
+                                        onChange={(e) => setCodeDrafts(prev => ({ ...prev, [qIdx]: e.target.value }))}
+                                        className="w-full h-48 p-4 bg-slate-900 text-emerald-400 border border-[#CBD5E1] rounded-xl font-mono text-xs sm:text-sm focus:ring-2 focus:ring-[#10B981] focus:outline-none leading-relaxed shadow-inner"
+                                        placeholder="Saisissez votre script Python3..."
+                                      />
+                                    </div>
+
+                                    {/* Compile sandbox button */}
+                                    <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
+                                      <div className="text-xs text-gray-400 font-mono">
+                                        Motif attendu en console : "{q.validationPattern}"
+                                      </div>
+                                      <button
+                                        onClick={() => handleTestRunCode(qIdx)}
+                                        disabled={codeOutputs[qIdx]?.running}
+                                        className="text-xs uppercase tracking-wider font-extrabold bg-[#0F1E36] hover:bg-slate-800 text-white px-4 py-2.5 rounded-xl cursor-pointer inline-flex items-center gap-2 transition-all shadow-2xs disabled:opacity-50"
+                                      >
+                                        {codeOutputs[qIdx]?.running ? (
+                                          <>
+                                            <RefreshCw size={12} className="animate-spin" />
+                                            Exécution...
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Play size={12} className="fill-white" />
+                                            Lancer le test automatique
+                                          </>
+                                        )}
+                                      </button>
+                                    </div>
+
+                                    {/* Terminal result console */}
+                                    {codeOutputs[qIdx] && (
+                                      <div className="p-4 bg-slate-950 text-[#F1F5F9] rounded-xl border border-slate-800 text-xs font-mono space-y-1.5 shadow-2xs">
+                                        <span className="text-gray-500 font-bold uppercase text-[9px] block">Console / Flux Standard :</span>
+                                        <pre className="whitespace-pre-wrap overflow-x-auto text-left leading-normal font-medium">
+                                          {codeOutputs[qIdx].output}
+                                        </pre>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                              </div>
+
+                              {/* Real-time Validation Feedback container */}
+                              {isQChecked && (
+                                <div className={`p-4 md:p-5 rounded-2xl border flex gap-3.5 text-xs sm:text-sm leading-relaxed text-left shadow-2xs ${
+                                  isQCorrect 
+                                    ? "bg-emerald-50/90 text-emerald-900 border-emerald-300" 
+                                    : "bg-red-50/90 text-red-900 border-red-250"
+                                }`}>
+                                  <div className="mt-0.5">
+                                    {isQCorrect ? (
+                                      <CheckCircle className="text-[#10B981] fill-emerald-100" size={18} />
+                                    ) : (
+                                      <AlertTriangle className="text-red-600 fill-red-100" size={18} />
+                                    )}
+                                  </div>
+                                  <div className="space-y-1.5 w-full">
+                                    <p className="font-extrabold text-sm">
+                                      {isQCorrect ? "✓ Réponse correcte !" : "✗ Réponse incorrecte"}
+                                    </p>
+                                    {q.explanation && (
+                                      <p className="text-xs text-slate-600 font-medium leading-relaxed">
+                                        <span className="font-bold text-[#0F1E36]">Explication : </span>
+                                        {q.explanation}
+                                      </p>
+                                    )}
+                                    {selectedQuiz.type === "coding_challenge" && q.solutionCode && (
+                                      <div className="mt-4 space-y-2 border-t border-slate-200/50 pt-3">
+                                        <span className="text-[10px] uppercase font-extrabold text-slate-700 block tracking-wider">
+                                          💡 Solution de référence Python attendue :
+                                        </span>
+                                        <pre className="p-4 bg-slate-900 text-emerald-400 rounded-xl font-mono text-xs overflow-x-auto whitespace-pre leading-relaxed border border-slate-950">
+                                          {q.solutionCode}
+                                        </pre>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Submission Zone action bars */}
+                      {currentUser.role === "student" && (
+                        <div className="pt-6 mt-8 border-t border-[#E5E7EB] flex flex-col sm:flex-row items-center justify-between gap-6 py-4 px-6 bg-slate-50/80 rounded-2xl border border-slate-200/80">
+                          <p className="text-xs text-slate-600 leading-relaxed max-w-md text-left font-medium">
+                            Vérifiez bien toutes vos réponses avant de soumettre. Une fois soumis, vos performances recalculées s'afficheront sur le tableau de bord principal.
+                          </p>
+
+                          <button
+                            onClick={handleConfirmSubmitQuiz}
+                            disabled={isSubmittingScore}
+                            className="px-6 py-3.5 bg-[#10B981] hover:bg-emerald-600 text-white rounded-xl text-xs font-extrabold uppercase tracking-wider inline-flex items-center gap-2.5 transition-all shadow-xs cursor-pointer disabled:opacity-50 hover:shadow-md shrink-0"
+                          >
+                            {isSubmittingScore ? (
+                              <>
+                                <RefreshCw size={13} className="animate-spin" />
+                                Transmission...
+                              </>
+                            ) : (
+                              <>
+                                <Send size={13} />
+                                Soumettre l'Évaluation
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Submission Success Alert and Premium Score Dashboard */}
+                      {lastSubmission ? (
+                        <div className="p-6 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl space-y-6 animate-fade-in text-xs text-left">
+                          <div className="flex flex-col sm:flex-row items-center gap-6 justify-between">
+                            <div className="flex items-center gap-4">
+                              {/* Circular Score representation */}
+                              <div className={`relative w-20 h-20 shrink-0 flex items-center justify-center rounded-full bg-white border-4 ${
+                                lastSubmission.score >= 80 ? "border-emerald-500" : "border-amber-500"
+                              } shadow-xs`}>
+                                <div className="text-center">
+                                  <span className="text-[#0F1E36] font-black text-lg block leading-none">{lastSubmission.score}%</span>
+                                  <span className="text-gray-400 font-mono text-[9px] block mt-0.5">{lastSubmission.correctCount} / {lastSubmission.totalQuestions}</span>
+                                </div>
+                              </div>
+
+                              <div className="space-y-1">
+                                <h4 className="text-[#0F1E36] font-bold text-sm">
+                                  Félicitations, évaluation terminée !
+                                </h4>
+                                <p className="text-[11px] text-gray-500 leading-relaxed">
+                                  {lastSubmission.score >= 80 
+                                    ? "🔥 Exceptionnel ! Vous maîtrisez parfaitement ce sujet !"
+                                    : lastSubmission.score >= 50 
+                                    ? "👍 Bon travail ! Vous y êtes presque. Continuez à vous entraîner !"
+                                    : "📚 Besoin de révision. N'hésitez pas à relire le cours pour consolider vos acquis !"}
+                                </p>
+                                {lastSubmission.score < 80 ? (
+                                  <p className="text-[10px] text-amber-600 font-bold flex items-center gap-1 mt-1">
+                                    <AlertTriangle size={12} className="animate-pulse" />
+                                    <span>Seuil de réussite (80%) non atteint. Retentez le quiz pour vous améliorer !</span>
+                                  </p>
+                                ) : (
+                                  <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1 mt-1">
+                                    <CheckCircle2 size={12} />
+                                    <span>Excellent ! Objectif de réussite (80%) atteint et enregistré dans votre profil.</span>
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="shrink-0 w-full sm:w-auto">
+                              {lastSubmission.score < 80 ? (
+                                <button
+                                  onClick={() => {
+                                    setUserAnswers({});
+                                    setQFeedback({});
+                                    setSubmissionSuccess(null);
+                                    setLastSubmission(null);
+                                    if (selectedQuiz.type === "coding_challenge") {
+                                      const drafts: { [key: number]: string } = {};
+                                      selectedQuiz.questions.forEach((q, idx) => {
+                                        drafts[idx] = q.starterCode || "";
+                                      });
+                                      setCodeDrafts(drafts);
+                                      setCodeOutputs({});
+                                    }
+                                  }}
+                                  className="w-full sm:w-auto px-5 py-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-extrabold uppercase tracking-wider text-[11px] cursor-pointer transition-all text-center inline-flex items-center justify-center gap-2 shadow-sm animate-pulse"
+                                >
+                                  <RefreshCw size={14} className="animate-spin-slow" />
+                                  <span>Retenter l'évaluation (Try Again)</span>
+                                </button>
+                              ) : (
+                                <div className="bg-emerald-50 border border-emerald-250 text-emerald-800 px-4 py-2.5 rounded-xl font-bold flex items-center gap-1.5 text-center">
+                                  <CheckCircle2 size={14} className="text-emerald-600" />
+                                  <span>Sujet validé !</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Brief Question Summary check */}
+                          <div className="border-t border-gray-100 pt-4 space-y-2">
+                            <p className="font-semibold text-gray-500 uppercase tracking-wider text-[9px]">Aperçu de vos réponses :</p>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-2">
+                              {selectedQuiz.questions.map((_, qIdx) => {
+                                const isCorrect = qFeedback[qIdx]?.correct;
+                                return (
+                                  <div 
+                                    key={qIdx} 
+                                    className={`p-2 rounded-xl border flex items-center justify-between text-[11px] ${
+                                      isCorrect 
+                                        ? "bg-emerald-50/50 border-emerald-200 text-emerald-850" 
+                                        : "bg-red-50/50 border-red-200 text-red-850"
+                                    }`}
+                                  >
+                                    <span className="font-bold">Question {qIdx + 1}</span>
+                                    <span className="font-mono font-bold">{isCorrect ? "✓" : "✗"}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        submissionSuccess && (
+                          <div className="p-4 bg-emerald-50 text-emerald-800 border border-[#10B981]/25 rounded-2xl flex items-center gap-3 animate-fade-in text-xs text-left">
+                            <CheckCircle2 size={18} className="text-[#10B981]" />
+                            <div>
+                              <p className="font-bold">Excellent travail ! Votre devoir a été soumis.</p>
+                              <p className="text-[11px] text-emerald-700 leading-relaxed font-semibold mt-0.5">
+                                {submissionSuccess}
+                              </p>
+                            </div>
+                          </div>
+                        )
+                      )}
+
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            </div>
+          )}
+
+        </div>
+      )}
+
+      {/* Instructor Creator Pane tab */}
+      {activeTab === "creer" && currentUser.role === "admin" && (
+        <form onSubmit={handlePublishQuiz} className="border border-[#E5E7EB] rounded-2xl p-5 bg-white space-y-6 text-left">
+          
+          <div className="border-b border-[#E5E7EB] pb-2 text-left">
+            <h2 className="text-[#0F1E36] font-bold text-sm tracking-tight flex items-center gap-1.5">
+              <Sparkles size={14} className="text-[#10B981]" /> Configurer et Publier un Nouveau Quiz / Exercice
+            </h2>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Remplissez le formulaire de configuration ci-dessous pour injecter un défi QCM, FIB ou Python en direct sur les plateformes étudiantes.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            
+            {/* Title */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] text-[#0F1E36] font-bold uppercase tracking-wider block">
+                Titre de l'évaluation
+              </label>
+              <input
+                type="text"
+                required
+                value={newTitle}
+                onChange={(e) => setNewTitle(e.target.value)}
+                placeholder="ex: Synthèse : Fichiers & Piles"
+                className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs font-semibold focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+              />
+            </div>
+
+            {/* Assessment Type */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] text-[#0F1E36] font-bold uppercase tracking-wider block">
+                Type de Défi
+              </label>
+              <select
+                value={newType}
+                onChange={(e) => setNewType(e.target.value as any)}
+                className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs font-semibold focus:ring-1 focus:ring-[#10B981] focus:outline-none bg-white"
+              >
+                <option value="qcm">QCM interactif (Choix Multiples)</option>
+                <option value="fllblanks">Champs à Remplir (Fill in the blanks)</option>
+                <option value="coding_challenge">Scripting / Défi Compiler Python</option>
+              </select>
+            </div>
+
+            {/* Target Grade / Level */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] text-[#0F1E36] font-bold uppercase tracking-wider block">
+                NIVEAU SCOLAIRE
+              </label>
+              <select
+                value={newGrade}
+                onChange={(e) => setNewGrade(e.target.value)}
+                className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs font-semibold focus:ring-1 focus:ring-[#10B981] focus:outline-none bg-white"
+              >
+                <option value="1ère">1ère</option>
+                <option value="2ème">2ème</option>
+                <option value="3ème">3ème</option>
+                <option value="4ème">4ème</option>
+              </select>
+            </div>
+
+            {/* Difficulty */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] text-[#0F1E36] font-bold uppercase tracking-wider block">
+                Difficulté d'Apprentissage
+              </label>
+              <select
+                value={newDifficulty}
+                onChange={(e) => setNewDifficulty(e.target.value as any)}
+                className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs font-semibold focus:ring-1 focus:ring-[#10B981] focus:outline-none bg-white"
+              >
+                <option value="Debutant">Débutant 🌱</option>
+                <option value="Intermediaire">Intermédiaire ⚙️</option>
+                <option value="Avance">Avancé 👑</option>
+              </select>
+            </div>
+
+          </div>
+
+          {/* Branch Checkbox Group */}
+          <div>
+            <BranchCheckboxGroup
+              value={newSections}
+              onChange={(selected, formattedStr) => {
+                setNewSections(selected);
+                setNewSection(formattedStr || 'Tous');
+              }}
+              idPrefix="quiz-module-branch"
+            />
+          </div>
+
+          {/* Dynamic Questions Generator Form */}
+          <div className="space-y-4 pt-2">
+            
+            {/* 1. QCM GENERATOR */}
+            {newType === "qcm" && (
+              <div className="space-y-4">
+                <span className="text-xs text-indigo-600 font-bold uppercase tracking-wider flex items-center gap-1">
+                  ✍️ FORMULAIRE DES QUESTIONS QCM
+                </span>
+                
+                {mcqQuestions.map((q, idx) => (
+                  <div key={idx} className="p-4 border border-indigo-100 rounded-xl bg-slate-55/10 space-y-4">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-extrabold text-slate-800">Question #{idx + 1}</span>
+                      {mcqQuestions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setMcqQuestions(mcqQuestions.filter((_, i) => i !== idx))}
+                          className="text-[10px] text-red-500 font-bold hover:underline"
+                        >
+                          Supprimer cette question
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5 text-left">
+                      <label className="text-[10px] uppercase font-bold text-slate-500">Intitulé de la question</label>
+                      <input
+                        type="text"
+                        required
+                        value={q.questionText}
+                        onChange={(e) => {
+                          const updated = [...mcqQuestions];
+                          updated[idx].questionText = e.target.value;
+                          setMcqQuestions(updated);
+                        }}
+                        placeholder="ex: Quel est le type d'un tableau unidimensionnel en Python ?"
+                        className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                      />
+                    </div>
+
+                    {/* Options subset inputs */}
+                    <div className="space-y-2 text-left">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[10px] uppercase font-bold text-slate-400">
+                          Options de réponse (Min. 2 — {q.options.length} définies)
+                        </label>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {q.options.map((opt, oIdx) => (
+                          <div key={oIdx} className="space-y-1 bg-white p-2 border border-slate-100 rounded-lg">
+                            <div className="flex items-center justify-between">
+                              <label className="text-[10px] uppercase font-bold text-slate-500">
+                                Option {String.fromCharCode(65 + oIdx)}
+                              </label>
+                              {q.options.length > 2 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = [...mcqQuestions];
+                                    const filtered = q.options.filter((_, i) => i !== oIdx);
+                                    let newCorrect = q.correctAnswerIndex;
+                                    if (q.correctAnswerIndex === oIdx) {
+                                      newCorrect = Math.max(0, oIdx - 1);
+                                    } else if (q.correctAnswerIndex > oIdx) {
+                                      newCorrect = q.correctAnswerIndex - 1;
+                                    }
+                                    if (newCorrect >= filtered.length) {
+                                      newCorrect = Math.max(0, filtered.length - 1);
+                                    }
+                                    updated[idx].options = filtered;
+                                    updated[idx].correctAnswerIndex = newCorrect;
+                                    setMcqQuestions(updated);
+                                  }}
+                                  className="text-red-400 hover:text-red-600 p-0.5 rounded cursor-pointer"
+                                  title="Supprimer l'option"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              required
+                              value={opt}
+                              onChange={(e) => {
+                                const updated = [...mcqQuestions];
+                                updated[idx].options[oIdx] = e.target.value;
+                                setMcqQuestions(updated);
+                              }}
+                              placeholder={`Option ${String.fromCharCode(65 + oIdx)}`}
+                              className="w-full px-3 py-1.5 border border-[#E2E8F0] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = [...mcqQuestions];
+                          updated[idx].options = [...q.options, ""];
+                          setMcqQuestions(updated);
+                        }}
+                        className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 font-bold text-[11px] rounded-lg flex items-center gap-1 cursor-pointer"
+                      >
+                        <Plus size={11} />
+                        <span>+ Ajouter une option</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      
+                      {/* Correct answer index selection */}
+                      <div className="space-y-1.5 text-left">
+                        <label className="text-[10px] uppercase font-bold text-slate-500">Option Correcte</label>
+                        <select
+                          value={q.correctAnswerIndex >= q.options.length ? 0 : q.correctAnswerIndex}
+                          onChange={(e) => {
+                            const updated = [...mcqQuestions];
+                            updated[idx].correctAnswerIndex = Number(e.target.value);
+                            setMcqQuestions(updated);
+                          }}
+                          className="w-full px-3 py-1.5 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none bg-white"
+                        >
+                          {q.options.map((_, optIdx) => (
+                            <option key={optIdx} value={optIdx}>
+                              Option {String.fromCharCode(65 + optIdx)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Explanation */}
+                      <div className="space-y-1.5 text-left">
+                        <label className="text-[10px] uppercase font-bold text-slate-500">
+                          Explication pédagogique (Optionnelle)
+                        </label>
+                        <input
+                          type="text"
+                          required={false}
+                          value={q.explanation || ""}
+                          onChange={(e) => {
+                            const updated = [...mcqQuestions];
+                            updated[idx].explanation = e.target.value;
+                            setMcqQuestions(updated);
+                          }}
+                          placeholder="ex: En Python, on modélise les tableaux avec le type natif list. (Optionnel)"
+                          className="w-full px-3 py-1.5 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                        />
+                      </div>
+
+                    </div>
+
+                  </div>
+                ))}
+
+                <button
+                  type="button"
+                  onClick={() => setMcqQuestions([...mcqQuestions, { questionText: "", options: ["", ""], correctAnswerIndex: 0, explanation: "" }])}
+                  className="bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-1 cursor-pointer w-fit"
+                >
+                  <Plus size={13} />
+                  Saisir une question supplémentaire QCM
+                </button>
+              </div>
+            )}
+
+            {/* 2. FIB GENERATOR */}
+            {newType === "fllblanks" && (
+              <div className="space-y-4">
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800 leading-normal">
+                  <p className="font-bold">💡 Guide de syntaxe Instructeur pour text-fill :</p>
+                  Saisissez l'affirmation en insérant l'expression attendue entre crochets, par exemple : <code className="font-bold bg-amber-100 px-1 py-0.5 rounded">En python, on utilise la méthode [append] pour ajouter un élément.</code>. L'étudiant verra l'affirmation avec un champ de saisie vide et sera validé s'il écrit exactement le mot configuré.
+                </div>
+
+                {fibQuestions.map((q, idx) => (
+                  <div key={idx} className="p-4 border border-amber-100 rounded-xl bg-amber-50/5 space-y-4">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-extrabold text-[#0D1F37]">Phrase à trous #{idx + 1}</span>
+                      {fibQuestions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setFibQuestions(fibQuestions.filter((_, i) => i !== idx))}
+                          className="text-[10px] text-red-500 font-bold hover:underline"
+                        >
+                          Supprimer
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5 text-left">
+                      <label className="text-[10px] uppercase font-bold text-slate-500 block">Phrase avec crochets []</label>
+                      <input
+                        type="text"
+                        required
+                        value={q.questionText}
+                        onChange={(e) => {
+                          const updated = [...fibQuestions];
+                          updated[idx].questionText = e.target.value;
+                          
+                          // Auto parse brackets words
+                          const matches = e.target.value.match(/\[(.*?)\]/g) || [];
+                          const cleaned = matches.map(m => m.replace(/[\[\]]/g, ""));
+                          updated[idx].correctAnswers = cleaned;
+
+                          setFibQuestions(updated);
+                        }}
+                        placeholder="ex: L'algorithme tri_bulles trie en O([n**2]) moyen."
+                        className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      
+                      {/* Detected answers */}
+                      <div className="space-y-1 text-left">
+                        <span className="text-[10px] uppercase font-bold text-gray-400 block">Mots-clés requis détectés :</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {q.correctAnswers.length === 0 ? (
+                            <span className="text-[10px] font-semibold text-red-500 italic">Aucun crochet [] détecté</span>
+                          ) : (
+                            q.correctAnswers.map((ans, aIdx) => (
+                              <span key={aIdx} className="bg-amber-100 border border-amber-300 text-amber-800 text-[10px] px-2 py-0.5 rounded font-mono">
+                                index #{aIdx + 1} : {ans}
+                              </span>
+                            ))
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Explanation */}
+                      <div className="space-y-1.5 text-left">
+                        <label className="text-[10px] uppercase font-bold text-slate-500">Explication de l'exercice</label>
+                        <input
+                          type="text"
+                          required
+                          value={q.explanation}
+                          onChange={(e) => {
+                            const updated = [...fibQuestions];
+                            updated[idx].explanation = e.target.value;
+                            setFibQuestions(updated);
+                          }}
+                          placeholder="Saisissez la justification pédagogique..."
+                          className="w-full px-3 py-1.5 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                        />
+                      </div>
+
+                    </div>
+                  </div>
+                ))}
+
+                <button
+                  type="button"
+                  onClick={() => setFibQuestions([...fibQuestions, { questionText: "Une [variable] stocke des informations.", correctAnswers: ["variable"], explanation: "" }])}
+                  className="bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-100 px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-1 cursor-pointer w-fit"
+                >
+                  <Plus size={13} />
+                  Saisir une affirmation Fill-in-the-blanks supplémentaire
+                </button>
+              </div>
+            )}
+
+            {/* 3. CODING CHALLENGE GENERATOR */}
+            {newType === "coding_challenge" && (
+              <div className="space-y-4">
+                <span className="text-xs text-purple-600 font-bold uppercase tracking-wider flex items-center gap-1">
+                  💻 ZONE CONFIGURATION DÉFI COMPILER PYTHON
+                </span>
+
+                {codingQuestions.map((q, idx) => (
+                  <div key={idx} className="p-4 border border-purple-100 rounded-xl bg-purple-50/5 space-y-4">
+                    
+                    {/* Challenge description */}
+                    <div className="space-y-1.5 text-left">
+                      <label className="text-[10px] uppercase font-bold text-slate-500 block">Enoncé / Consigne du problème</label>
+                      <textarea
+                        required
+                        value={q.challengeDescription}
+                        onChange={(e) => {
+                          const updated = [...codingQuestions];
+                          updated[idx].challengeDescription = e.target.value;
+                          setCodingQuestions(updated);
+                        }}
+                        rows={3}
+                        placeholder="Qu'attend-on de l'élève ? e.g. Programmer une fonction tri_selection(t) qui prend..."
+                        className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                      
+                      {/* Starter code */}
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase font-bold text-slate-500 block">Code de démarrage étudiant (starter code)</label>
+                        <textarea
+                          required
+                          value={q.starterCode}
+                          onChange={(e) => {
+                            const updated = [...codingQuestions];
+                            updated[idx].starterCode = e.target.value;
+                            setCodingQuestions(updated);
+                          }}
+                          rows={6}
+                          className="w-full p-2 bg-slate-900 text-[#F1F5F9] font-mono text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none rounded-lg"
+                        />
+                      </div>
+
+                      {/* Solution code */}
+                      <div className="space-y-1">
+                        <label className="text-[10px] uppercase font-bold text-slate-500 block">Solution complète pour référence</label>
+                        <textarea
+                          required
+                          value={q.solutionCode}
+                          onChange={(e) => {
+                            const updated = [...codingQuestions];
+                            updated[idx].solutionCode = e.target.value;
+                            setCodingQuestions(updated);
+                          }}
+                          rows={6}
+                          className="w-full p-2 bg-[#F8FAFC] text-slate-800 border font-mono text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none rounded-lg"
+                        />
+                      </div>
+
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                      
+                      {/* Validation Pattern */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] uppercase font-bold text-slate-500 block">Sortie console attendue (Validation Pattern)</label>
+                        <input
+                          type="text"
+                          required
+                          value={q.validationPattern}
+                          onChange={(e) => {
+                            const updated = [...codingQuestions];
+                            updated[idx].validationPattern = e.target.value;
+                            setCodingQuestions(updated);
+                          }}
+                          placeholder="ex: Le tableau trié: [1, 2, 5]"
+                          className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none font-mono"
+                        />
+                        <p className="text-[9px] text-gray-400">
+                          L'application valide l'exercice si le résultat du terminal d'exécution Piston de l'étudiant contient précisément cette chaîne de caractères.
+                        </p>
+                      </div>
+
+                      {/* Explanation */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] uppercase font-bold text-slate-500 block">Note explicative de correction</label>
+                        <input
+                          type="text"
+                          required
+                          value={q.explanation}
+                          onChange={(e) => {
+                            const updated = [...codingQuestions];
+                            updated[idx].explanation = e.target.value;
+                            setCodingQuestions(updated);
+                          }}
+                          placeholder="ex: On échange t[j] et t[j+1] dans la boucle imbriquée."
+                          className="w-full px-3 py-2 border border-[#CBD5E1] rounded-lg text-xs focus:ring-1 focus:ring-[#10B981] focus:outline-none"
+                        />
+                      </div>
+
+                    </div>
+
+                  </div>
+                ))}
+              </div>
+            )}
+
+          </div>
+
+          <div className="pt-4 border-t border-[#E5E7EB] flex justify-end gap-3">
+            <button
+              type="submit"
+              className="bg-[#10B981] hover:bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-xs cursor-pointer transition-colors"
+            >
+              <Send size={12} className="fill-white" />
+              Publier l'évaluation active
+            </button>
+          </div>
+
+          {creatorMsg && (
+            <div className="p-4 bg-emerald-50 text-emerald-850 border border-emerald-200 rounded-xl flex items-center gap-2 font-bold text-xs">
+              <CheckCircle size={16} className="text-[#10B981]" />
+              {creatorMsg}
+            </div>
+          )}
+
+        </form>
+      )}
+
+      {/* Modal d'Accès Refusé */}
+      <AccessDeniedModal
+        isOpen={isDeniedModalOpen}
+        onClose={() => setIsDeniedModalOpen(false)}
+        selectedQuiz={selectedQuizForDeniedModal}
+        userBadge={normalizeBadge(currentUser?.activeBadge || currentUser?.badge || (currentUser as any)?.subscriptionBadge || currentUser?.status)}
+      />
+
+    </div>
+  );
+}

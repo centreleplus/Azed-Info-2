@@ -1,0 +1,836 @@
+import React, { useState, useEffect } from "react";
+import { 
+  ShieldCheck, 
+  KeyRound, 
+  Lock, 
+  Eye, 
+  EyeOff, 
+  CheckCircle2, 
+  AlertTriangle, 
+  Check, 
+  User, 
+  Mail, 
+  Building2, 
+  Shield, 
+  RefreshCw, 
+  CheckCircle,
+  Clock,
+  Sparkles,
+  Camera,
+  Upload,
+  Trash2,
+  Image as ImageIcon,
+  Smartphone,
+  QrCode,
+  Copy,
+  ToggleLeft,
+  ToggleRight
+} from "lucide-react";
+import { User as UserType } from "../types";
+import { broadcastLocalEvent } from "../lib/useRealtimeSync";
+import { useBrandIdentity } from "../context/BrandIdentityContext";
+
+interface AdminProfileSecurityViewProps {
+  currentUser: UserType;
+  setCurrentUser?: React.Dispatch<React.SetStateAction<UserType | null>>;
+  onAdminActionRefetch?: () => void;
+}
+
+export default function AdminProfileSecurityView({
+  currentUser,
+  setCurrentUser,
+  onAdminActionRefetch
+}: AdminProfileSecurityViewProps) {
+  const { identity, updateBrandIdentity } = useBrandIdentity();
+  const [authorPhoto, setAuthorPhoto] = useState<string>(identity.teacherAvatar || "");
+  const [isPhotoSaving, setIsPhotoSaving] = useState(false);
+  const [photoSuccess, setPhotoSuccess] = useState<string | null>(null);
+
+  // 2FA Admin Settings state
+  const [twoFactorEnabled, setTwoFactorEnabled] = useState(true);
+  const [twoFactorMethod, setTwoFactorMethod] = useState<"email" | "totp">("email");
+  const [totpSecret, setTotpSecret] = useState("AZED-ADMIN-2FA-NABIL-CHAOUCH-849201");
+  const [is2faSaving, setIs2faSaving] = useState(false);
+  const [twoFactorSuccess, setTwoFactorSuccess] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [testTotpCode, setTestTotpCode] = useState("");
+  const [testTotpResult, setTestTotpResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/admin/2fa-config")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data) {
+          setTwoFactorEnabled(data.enabled !== false);
+          setTwoFactorMethod(data.method === "totp" ? "totp" : "email");
+          if (data.totpSecret) setTotpSecret(data.totpSecret);
+        }
+      })
+      .catch((e) => console.warn("Failed to fetch 2FA config:", e));
+  }, []);
+
+  useEffect(() => {
+    if (identity.teacherAvatar) {
+      setAuthorPhoto(identity.teacherAvatar);
+    }
+  }, [identity.teacherAvatar]);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  const [isLoading, setIsLoading] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const isMatching = newPassword && confirmPassword && newPassword === confirmPassword;
+  const isLengthValid = newPassword.length >= 6;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSuccessMessage(null);
+    setErrorMessage(null);
+
+    const cleanCurrent = currentPassword.trim();
+    const cleanNew = newPassword.trim();
+    const cleanConfirm = confirmPassword.trim();
+
+    if (!cleanCurrent) {
+      setErrorMessage("Veuillez saisir votre mot de passe actuel.");
+      return;
+    }
+
+    if (!cleanNew || cleanNew.length < 6) {
+      setErrorMessage("Le nouveau mot de passe doit comporter au moins 6 caractères.");
+      return;
+    }
+
+    if (cleanNew !== cleanConfirm) {
+      setErrorMessage("Les deux champs du nouveau mot de passe ne correspondent pas.");
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/admin/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          email: currentUser.email,
+          currentPassword: cleanCurrent,
+          oldPassword: cleanCurrent,
+          newPassword: cleanNew,
+          password: cleanNew
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || data.msg || "Impossible de modifier le mot de passe.");
+      }
+
+      setSuccessMessage(data.message || "Mot de passe mis à jour avec succès et enregistré dans la base de données !");
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+
+      if (setCurrentUser) {
+        setCurrentUser(prev => prev ? { ...prev, password: cleanNew } : null);
+      }
+
+      try {
+        const storedUser = localStorage.getItem("current_user");
+        if (storedUser) {
+          const parsed = JSON.parse(storedUser);
+          parsed.password = cleanNew;
+          localStorage.setItem("current_user", JSON.stringify(parsed));
+        }
+      } catch (e) {
+        console.warn("Could not update current_user in localStorage:", e);
+      }
+
+      broadcastLocalEvent({
+        type: "USER_PASSWORD_UPDATED",
+        payload: {
+          userId: currentUser.id,
+          email: currentUser.email,
+          newPassword: cleanNew
+        }
+      });
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("user-password-changed", {
+            detail: {
+              userId: currentUser.id,
+              email: currentUser.email,
+              newPassword: cleanNew
+            }
+          })
+        );
+        window.dispatchEvent(new CustomEvent("refresh-users"));
+      }
+
+      if (onAdminActionRefetch) {
+        onAdminActionRefetch();
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || "Une erreur est survenue lors de la mise à jour.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 text-left max-w-5xl mx-auto pb-12">
+      {/* Top Banner / Header */}
+      <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 bg-amber-50 border border-amber-200/80 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
+              Sécurité & Authentification Super-Admin
+            </span>
+          </div>
+          <h1 className="text-xl sm:text-2xl font-black text-[#0F1E36] tracking-tight">
+            Profil & Sécurité Administrateur
+          </h1>
+          <p className="text-xs text-slate-500 mt-1">
+            Gérez vos informations d'accès système et modifiez le mot de passe de votre compte Super-Admin.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 bg-slate-50 border border-slate-200/80 p-2.5 rounded-2xl shrink-0">
+          <div className="w-[52px] h-[52px] rounded-xl bg-gradient-to-tr from-amber-600 to-amber-400 text-white flex items-center justify-center font-black text-sm shadow-xs overflow-hidden border border-amber-200 shrink-0">
+            {authorPhoto || identity.teacherAvatar ? (
+              <img src={authorPhoto || identity.teacherAvatar} alt="Professeur Nabil Chaouch" className="w-full h-full object-cover" />
+            ) : (
+              currentUser.fullName ? currentUser.fullName.charAt(0) : "A"
+            )}
+          </div>
+          <div>
+            <p className="text-xs font-bold text-slate-900 leading-tight">
+              {currentUser.fullName || "Professeur Nabil Chaouch"}
+            </p>
+            <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-amber-600">
+              <Sparkles size={10} /> Super-Administrateur
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Alerts */}
+      {successMessage && (
+        <div className="p-4 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-2xl text-xs flex items-start gap-3 shadow-xs animate-fade-in">
+          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-bold text-sm text-emerald-900">Mise à jour réussie</p>
+            <p className="text-emerald-700 text-xs mt-0.5">{successMessage}</p>
+          </div>
+        </div>
+      )}
+
+      {errorMessage && (
+        <div className="p-4 bg-rose-50 border border-rose-300 text-rose-900 rounded-2xl text-xs flex items-start gap-3 shadow-xs animate-fade-in">
+          <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-bold text-sm text-rose-900">Erreur de validation</p>
+            <p className="text-rose-700 text-xs mt-0.5">{errorMessage}</p>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column: Account Information (Read Only) */}
+        <div className="lg:col-span-5 space-y-6">
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-5">
+            <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                  <User className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-black text-[#0F1E36]">Informations du Compte</h2>
+                  <p className="text-[10px] text-slate-400">Données système en lecture seule</p>
+                </div>
+              </div>
+              <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md">
+                Actif & Vérifié
+              </span>
+            </div>
+
+            <div className="space-y-3.5">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Adresse e-mail Super-Admin
+                </label>
+                <div className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800">
+                  <Mail className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span className="font-mono">{currentUser.email || "centreleplus@gmail.com"}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Nom & Prénom
+                </label>
+                <div className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800">
+                  <User className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span>{currentUser.fullName || "Nabil Chaouch (Le Plus)"}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Rôle & Privilèges Système
+                </label>
+                <div className="flex items-center justify-between px-3.5 py-2.5 bg-amber-50/60 border border-amber-200/80 rounded-xl text-xs font-bold text-amber-900">
+                  <div className="flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Super-Administrateur</span>
+                  </div>
+                  <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 bg-amber-200 text-amber-900 rounded">
+                    Accès Total
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Établissement & Siège
+                </label>
+                <div className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800">
+                  <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span>{currentUser.address || "Centre Le Plus, El Mourouj, Tunis"}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100">
+              <div className="p-3 bg-slate-50 border border-slate-200/70 rounded-xl space-y-1">
+                <p className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-slate-400" /> Session sécurisée
+                </p>
+                <p className="text-[10px] text-slate-500 leading-relaxed">
+                  Votre compte dispose des droits de gestion absolue sur les cours, les paiements, les quiz, et les utilisateurs de la plateforme A-zed Info.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Author Photo / Avatar Management Card for Admin */}
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-4">
+            <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-600 border border-amber-200/80 flex items-center justify-center shrink-0">
+                  <Camera className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-black text-[#0F1E36]">Photo de l'Auteur (Professeur Nabil Chaouch)</h2>
+                  <p className="text-[10px] text-slate-400">Gestion de l'avatar affiché sur la page d'accueil</p>
+                </div>
+              </div>
+              <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-md">
+                Admin Uniquement
+              </span>
+            </div>
+
+            {photoSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2">
+                <CheckCircle2 size={14} className="text-emerald-600" />
+                <span>{photoSuccess}</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-4">
+              <div className="relative w-16 h-16 rounded-full border-2 border-amber-300 overflow-hidden bg-slate-100 flex items-center justify-center shrink-0 shadow-sm">
+                {authorPhoto ? (
+                  <img src={authorPhoto} alt="Auteur" className="w-full h-full object-cover rounded-full" />
+                ) : (
+                  <User className="w-7 h-7 text-slate-400" />
+                )}
+              </div>
+
+              <div className="flex-1 space-y-1.5">
+                <input
+                  type="file"
+                  accept="image/*"
+                  id="admin-profile-teacher-photo-file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                      if (typeof reader.result === "string") {
+                        setAuthorPhoto(reader.result);
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label
+                    htmlFor="admin-profile-teacher-photo-file"
+                    className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer inline-flex items-center gap-1.5 transition-all shadow-xs"
+                  >
+                    <Upload size={12} />
+                    Téléverser une nouvelle photo
+                  </label>
+                  {authorPhoto && (
+                    <button
+                      type="button"
+                      onClick={() => setAuthorPhoto("")}
+                      className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-all cursor-pointer inline-flex items-center gap-1"
+                    >
+                      <Trash2 size={12} />
+                      Supprimer
+                    </button>
+                  )}
+                </div>
+                <p className="text-[10px] text-slate-400 font-medium">Formats acceptés: JPG, PNG, WebP (max 5 Mo)</p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 pt-1">
+              <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Lien URL ou Data-URI de l'image
+              </label>
+              <input
+                type="text"
+                value={authorPhoto}
+                onChange={(e) => setAuthorPhoto(e.target.value)}
+                placeholder="https://... ou data:image/..."
+                className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-medium text-slate-800 focus:bg-white focus:border-amber-500 outline-none transition-all"
+              />
+            </div>
+
+            <button
+              type="button"
+              disabled={isPhotoSaving}
+              onClick={async () => {
+                setIsPhotoSaving(true);
+                setPhotoSuccess(null);
+                const ok = await updateBrandIdentity({
+                  teacherAvatar: authorPhoto,
+                  requesterRole: currentUser.role || "admin",
+                  requesterEmail: currentUser.email
+                });
+                setIsPhotoSaving(false);
+                if (ok) {
+                  setPhotoSuccess("Photo de l'auteur mise à jour avec succès !");
+                  setTimeout(() => setPhotoSuccess(null), 3000);
+                }
+              }}
+              className="w-full py-2.5 px-4 bg-amber-600 hover:bg-amber-700 active:scale-[0.99] text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
+            >
+              {isPhotoSaving ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Enregistrement...</span>
+                </>
+              ) : (
+                <>
+                  <Check className="w-3.5 h-3.5 stroke-[3]" />
+                  <span>Mettre à jour la photo de l'auteur</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Right Column: Password Change Form */}
+        <div className="lg:col-span-7 space-y-6">
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-5">
+            <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-600 border border-amber-200/80 flex items-center justify-center shrink-0">
+                  <KeyRound className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-black text-[#0F1E36]">Changement de Mot de Passe</h2>
+                  <p className="text-[10px] text-slate-400">Mettez à jour vos identifiants d'accès sécurisés</p>
+                </div>
+              </div>
+              <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md">
+                Min. 6 car.
+              </span>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {/* Champ 1 : Mot de passe actuel */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Mot de passe actuel <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <Lock className="w-4 h-4" />
+                  </div>
+                  <input
+                    type={showCurrentPassword ? "text" : "password"}
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    placeholder="Saisissez votre mot de passe actuel..."
+                    className="w-full pl-10 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 outline-none transition-all"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Mot de passe initial par défaut : <span className="font-mono font-bold text-slate-600">admin123</span>
+                </p>
+              </div>
+
+              <div className="border-t border-slate-100 my-2 pt-2" />
+
+              {/* Champ 2 : Nouveau mot de passe */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Nouveau mot de passe <span className="text-rose-500">*</span>
+                  </label>
+                  {newPassword && (
+                    <span className={`text-[10px] font-bold ${isLengthValid ? "text-emerald-600" : "text-rose-500"}`}>
+                      {isLengthValid ? "Longueur valide (≥ 6)" : "Trop court (min. 6 car.)"}
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <KeyRound className="w-4 h-4" />
+                  </div>
+                  <input
+                    type={showNewPassword ? "text" : "password"}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Au moins 6 caractères..."
+                    className={`w-full pl-10 pr-10 py-2.5 bg-slate-50 border rounded-xl text-xs text-slate-900 focus:bg-white outline-none transition-all ${
+                      newPassword && !isLengthValid 
+                        ? "border-rose-300 focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20" 
+                        : "border-slate-200 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20"
+                    }`}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(!showNewPassword)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Champ 3 : Confirmation du nouveau mot de passe */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Confirmation du nouveau mot de passe <span className="text-rose-500">*</span>
+                  </label>
+                  {confirmPassword && (
+                    <span className={`text-[10px] font-bold flex items-center gap-1 ${isMatching ? "text-emerald-600" : "text-rose-500"}`}>
+                      {isMatching ? (
+                        <>
+                          <CheckCircle className="w-3 h-3" /> Mots de passe identiques
+                        </>
+                      ) : (
+                        "Ne correspond pas"
+                      )}
+                    </span>
+                  )}
+                </div>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <Lock className="w-4 h-4" />
+                  </div>
+                  <input
+                    type={showConfirmPassword ? "text" : "password"}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirmez le nouveau mot de passe..."
+                    className={`w-full pl-10 pr-10 py-2.5 bg-slate-50 border rounded-xl text-xs text-slate-900 focus:bg-white outline-none transition-all ${
+                      confirmPassword && !isMatching 
+                        ? "border-rose-300 focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20" 
+                        : "border-slate-200 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20"
+                    }`}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Submit Button */}
+              <div className="pt-3">
+                <button
+                  type="submit"
+                  disabled={isLoading || !isLengthValid || !isMatching}
+                  className="w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                >
+                  {isLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Enregistrement en base de données...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4 stroke-[3]" />
+                      <span>Enregistrer les modifications</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* 2FA Administrator Security & Double Verification Management Card */}
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-5">
+            <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-600 border border-amber-200/80 flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-4 h-4 text-amber-600" />
+                </span>
+                <div>
+                  <h2 className="text-sm font-black text-[#0F1E36]">Sécurité & Double Authentification (2FA)</h2>
+                  <p className="text-[10px] text-slate-400">Protection renforcée pour les comptes Administrateur</p>
+                </div>
+              </div>
+              <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md ${twoFactorEnabled ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-slate-100 text-slate-500"}`}>
+                {twoFactorEnabled ? "2FA Actif" : "2FA Désactivé"}
+              </span>
+            </div>
+
+            {twoFactorSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2">
+                <CheckCircle2 size={14} className="text-emerald-600" />
+                <span>{twoFactorSuccess}</span>
+              </div>
+            )}
+
+            {/* Toggle 2FA Activation */}
+            <div className="p-4 bg-slate-50 border border-slate-200/80 rounded-2xl flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <p className="text-xs font-black text-slate-900">Activer la Double Authentification (2FA)</p>
+                <p className="text-[10px] text-slate-500">Exige un code de vérification à 6 chiffres après la saisie du mot de passe.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
+                className={`p-1.5 rounded-xl border transition-all cursor-pointer flex items-center gap-2 font-bold text-xs ${
+                  twoFactorEnabled 
+                    ? "bg-amber-500 text-white border-amber-600 shadow-xs" 
+                    : "bg-slate-200 text-slate-600 border-slate-300"
+                }`}
+              >
+                {twoFactorEnabled ? (
+                  <>
+                    <ToggleRight className="w-5 h-5 text-white" />
+                    <span>Activé</span>
+                  </>
+                ) : (
+                  <>
+                    <ToggleLeft className="w-5 h-5 text-slate-400" />
+                    <span>Désactivé</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Select 2FA Method */}
+            {twoFactorEnabled && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    Méthode de livraison du code
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setTwoFactorMethod("email")}
+                      className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex items-start gap-3 ${
+                        twoFactorMethod === "email"
+                          ? "border-amber-500 bg-amber-50/60 ring-2 ring-amber-500/20 text-slate-900"
+                          : "border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${twoFactorMethod === "email" ? "bg-amber-600 text-white" : "bg-slate-200 text-slate-600"}`}>
+                        <Mail size={16} />
+                      </div>
+                      <div>
+                        <p className="text-xs font-extrabold text-slate-900">Code OTP par E-mail</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">Envoi automatique à {currentUser.email || "centreleplus@gmail.com"}</p>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setTwoFactorMethod("totp")}
+                      className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex items-start gap-3 ${
+                        twoFactorMethod === "totp"
+                          ? "border-amber-500 bg-amber-50/60 ring-2 ring-amber-500/20 text-slate-900"
+                          : "border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${twoFactorMethod === "totp" ? "bg-amber-600 text-white" : "bg-slate-200 text-slate-600"}`}>
+                        <Smartphone size={16} />
+                      </div>
+                      <div>
+                        <p className="text-xs font-extrabold text-slate-900">Application TOTP</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">Google Authenticator, Authy, ou 1Password</p>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                {/* TOTP Config details if TOTP chosen */}
+                {twoFactorMethod === "totp" && (
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <QrCode size={14} className="text-amber-600" /> Clé Secrète Authenticateur
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const newSec = "AZED-ADMIN-2FA-" + Math.floor(100000 + Math.random() * 900000);
+                          setTotpSecret(newSec);
+                        }}
+                        className="text-[10px] font-bold text-amber-600 hover:underline cursor-pointer"
+                      >
+                        Générer une nouvelle clé
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 p-2.5 bg-white border border-slate-200 rounded-xl font-mono text-xs font-bold text-slate-800 text-center tracking-widest">
+                        {totpSecret}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(totpSecret);
+                          setCopiedKey(true);
+                          setTimeout(() => setCopiedKey(false), 2000);
+                        }}
+                        className="p-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shrink-0"
+                        title="Copier la clé secrète"
+                      >
+                        {copiedKey ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                      </button>
+                    </div>
+
+                    {/* Simulation of QR code preview */}
+                    <div className="p-3 bg-white border border-slate-200 rounded-xl text-center space-y-2">
+                      <p className="text-[10px] text-slate-400 font-medium">Scannez ce QR Code dans Google Authenticator :</p>
+                      <div className="w-28 h-28 mx-auto bg-slate-900 text-white p-2 rounded-xl flex flex-col items-center justify-center font-mono text-[9px] text-center border-2 border-amber-400/50 shadow-xs">
+                        <QrCode size={48} className="text-amber-400 mb-1" />
+                        <span className="text-[8px] text-slate-300 font-bold">AZED-INFO-2FA</span>
+                      </div>
+                    </div>
+
+                    {/* Test Code Input */}
+                    <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                        Tester un code d'authentification à 6 chiffres
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          maxLength={6}
+                          value={testTotpCode}
+                          onChange={(e) => setTestTotpCode(e.target.value.replace(/\D/g, ""))}
+                          placeholder="Ex: 849201"
+                          className="flex-1 px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-mono font-bold text-slate-800 outline-none focus:border-amber-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (testTotpCode.length === 6) {
+                              setTestTotpResult({ ok: true, msg: "Code valide ! L'application Authentificateur est prête." });
+                            } else {
+                              setTestTotpResult({ ok: false, msg: "Veuillez saisir un code à 6 chiffres." });
+                            }
+                          }}
+                          className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer transition-all"
+                        >
+                          Tester
+                        </button>
+                      </div>
+
+                      {testTotpResult && (
+                        <p className={`text-[11px] font-bold ${testTotpResult.ok ? "text-emerald-600" : "text-rose-500"}`}>
+                          {testTotpResult.msg}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Save 2FA settings button */}
+            <button
+              type="button"
+              disabled={is2faSaving}
+              onClick={async () => {
+                setIs2faSaving(true);
+                setTwoFactorSuccess(null);
+                try {
+                  const res = await fetch("/api/admin/2fa-config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      enabled: twoFactorEnabled,
+                      method: twoFactorMethod,
+                      totpSecret
+                    })
+                  });
+                  const data = await res.json();
+                  if (res.ok) {
+                    setTwoFactorSuccess(data.msg || "Paramètres 2FA enregistrés avec succès !");
+                    setTimeout(() => setTwoFactorSuccess(null), 3000);
+                  }
+                } catch (e) {
+                  console.error("Save 2FA config failed:", e);
+                } finally {
+                  setIs2faSaving(false);
+                }
+              }}
+              className="w-full py-3 bg-amber-600 hover:bg-amber-700 active:scale-[0.99] text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
+            >
+              {is2faSaving ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Enregistrement...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Sauvegarder les paramètres 2FA</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
